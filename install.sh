@@ -12,8 +12,10 @@
 # Repetir a execução atualiza o binário sem tocar em dados nem na configuração.
 #
 # Opções por variável de ambiente:
-#   BM_ADDR=0.0.0.0:8090   onde o painel escuta (padrão: só 127.0.0.1)
-#   BM_VERSAO=v0.2.0       instala uma versão específica em vez da última
+#   BM_ADDR=127.0.0.1:8090       onde o painel escuta (padrão: todas as interfaces)
+#   BM_TLS_HOSTS=backup.seu.com  nomes que entram no certificado
+#   BM_TLS_CERT / BM_TLS_KEY     usa um certificado seu em vez do autoassinado
+#   BM_VERSAO=v0.2.0             instala uma versão específica em vez da última
 #
 set -euo pipefail
 
@@ -101,17 +103,36 @@ ok "$DATA_DIR e $BIN_DIR"
 
 # ─── Configuração ─────────────────────────────────────────────────────────
 msg "Configuração"
+IP_PUBLICO=$(curl -fsS --max-time 10 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')
+
 if [ -f "$CONF" ]; then
     ok "$CONF já existe; mantido"
+
+    # Instalação anterior escutava só no loopback, quando o painel ainda não
+    # servia HTTPS. Agora serve, então migra para ficar acessível de fora —
+    # que é o motivo de ele existir. Só o valor que ERA o padrão é trocado;
+    # um endereço escolhido à mão é decisão de alguém e fica como está.
+    if grep -q '^BM_ADDR=127.0.0.1:8090$' "$CONF"; then
+        sed -i 's|^BM_ADDR=127.0.0.1:8090$|BM_ADDR=0.0.0.0:8090|' "$CONF"
+        warn "o painel passou a escutar em todas as interfaces (antes: só localhost)"
+    fi
+    if ! grep -q '^BM_TLS_HOSTS=' "$CONF"; then
+        echo "BM_TLS_HOSTS=${BM_TLS_HOSTS:-$IP_PUBLICO}" >> "$CONF"
+    fi
 else
     cat > "$CONF" <<EOF
 # Cifra as senhas guardadas no banco (do MySQL/PostgreSQL de origem e do FTP/SFTP).
 # ATENÇÃO: trocar esta chave torna ilegível tudo que já foi cifrado.
 BM_ENCRYPTION_KEY=$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
 
-# O painel escuta só no loopback: acesse por túnel SSH ou publique atrás de um
-# proxy com HTTPS. Expor a porta direto faria a senha trafegar em claro.
-BM_ADDR=${BM_ADDR:-127.0.0.1:8090}
+# O painel serve o próprio HTTPS, sem depender de proxy nenhum na frente.
+BM_ADDR=${BM_ADDR:-0.0.0.0:8090}
+
+# Nomes que entram no certificado. Sem um certificado seu em BM_TLS_CERT, o
+# painel gera um autoassinado no primeiro arranque: o navegador avisa uma vez
+# que não conhece quem emitiu, e o tráfego é cifrado do mesmo jeito. Pedir
+# certificado ao Let's Encrypt exigiria as portas 80 ou 443 livres.
+BM_TLS_HOSTS=${BM_TLS_HOSTS:-$IP_PUBLICO}
 
 BM_DATA_DIR=${DATA_DIR}
 TZ=America/Sao_Paulo
@@ -182,22 +203,32 @@ fi
 
 # ─── Fim ──────────────────────────────────────────────────────────────────
 ADDR=$(grep -E '^BM_ADDR=' "$CONF" | cut -d= -f2-)
+PORTA=${ADDR##*:}
+HOSTS=$(grep -E '^BM_TLS_HOSTS=' "$CONF" | cut -d= -f2- | cut -d, -f1)
+[ -n "$HOSTS" ] || HOSTS=$IP_PUBLICO
+
 cat <<FIM
 
 ────────────────────────────────────────────────────────────
  Instalado.
 
-   Painel      http://${ADDR}
+   Painel      https://${HOSTS}:${PORTA}
    Log         journalctl -u backupmanager -f
    Reiniciar   systemctl restart backupmanager
    Config      ${CONF}
 
- O painel escuta só nesta máquina. Para abrir daqui do seu computador:
-
-   ssh -L 8090:${ADDR} root@<ip-desta-vps>
-   e acesse http://localhost:8090
-
  O primeiro acesso cria o usuário administrador.
+
+ O certificado é autoassinado: o navegador vai avisar uma vez que não
+ conhece quem o emitiu. Pode prosseguir — o tráfego é cifrado do mesmo
+ jeito, e é o que impede sua senha de trafegar legível. Para um
+ certificado sem aviso, aponte BM_TLS_CERT e BM_TLS_KEY em ${CONF}.
+
+ Se a porta ${PORTA} estiver fechada no firewall do provedor, libere-a —
+ ou acesse por túnel:
+
+   ssh -L ${PORTA}:127.0.0.1:${PORTA} root@${HOSTS}
+   e abra https://localhost:${PORTA}
 ────────────────────────────────────────────────────────────
 
 FIM
