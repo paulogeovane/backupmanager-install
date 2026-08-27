@@ -17,7 +17,12 @@
 #
 set -euo pipefail
 
-BIN=/usr/local/bin/backupmanager
+# O binário mora em /opt, num diretório do usuário do serviço: é o que permite
+# ao painel se atualizar sozinho sem rodar como root. O link em /usr/local/bin
+# é só para o comando existir no PATH.
+BIN_DIR=/opt/backupmanager
+BIN=$BIN_DIR/backupmanager
+LINK=/usr/local/bin/backupmanager
 CONF_DIR=/etc/backupmanager
 CONF="$CONF_DIR/bm.env"
 DATA_DIR=/var/lib/backupmanager
@@ -63,6 +68,7 @@ else
     BASE="https://github.com/$REPO_DIST/releases/latest/download"
 fi
 
+mkdir -p "$BIN_DIR"
 curl -fsSL -o "$BIN.novo" "$BASE/backupmanager-linux-$ARQ" || die "não consegui baixar o binário de $BASE"
 curl -fsSL -o /tmp/SHA256SUMS "$BASE/SHA256SUMS" || die "não consegui baixar o SHA256SUMS"
 
@@ -75,6 +81,9 @@ ok "checksum conferido"
 chmod 755 "$BIN.novo"
 # Só troca no fim: uma falha antes daqui não pode deixar o serviço sem binário.
 mv "$BIN.novo" "$BIN"
+# Instalação antiga tinha o binário direto em /usr/local/bin; vira link.
+[ -L "$LINK" ] || rm -f "$LINK"
+ln -sfn "$BIN" "$LINK"
 ok "$BIN ($("$BIN" --versao | awk '{print $2}'), $(du -h "$BIN" | cut -f1))"
 
 # ─── Usuário e diretórios ─────────────────────────────────────────────────
@@ -86,9 +95,9 @@ else
     ok "usuário $SERVICE_USER já existe"
 fi
 mkdir -p "$DATA_DIR" "$CONF_DIR"
-chown -R "$SERVICE_USER":"$SERVICE_USER" "$DATA_DIR"
+chown -R "$SERVICE_USER":"$SERVICE_USER" "$DATA_DIR" "$BIN_DIR"
 chmod 750 "$DATA_DIR"
-ok "$DATA_DIR"
+ok "$DATA_DIR e $BIN_DIR"
 
 # ─── Configuração ─────────────────────────────────────────────────────────
 msg "Configuração"
@@ -123,11 +132,14 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/backupmanager
+ExecStart=/opt/backupmanager/backupmanager
 EnvironmentFile=/etc/backupmanager/bm.env
 
+# Restart=always é também o mecanismo de atualização: o painel troca o
+# binário e encerra; o systemd o traz de volta já na versão nova. Assim não
+# precisa de privilégio para chamar systemctl.
 Restart=always
-RestartSec=5s
+RestartSec=2s
 
 User=backupmanager
 Group=backupmanager
@@ -141,7 +153,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/backupmanager /usr/local/bin
+ReadWritePaths=/var/lib/backupmanager /opt/backupmanager
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
